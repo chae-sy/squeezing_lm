@@ -15,13 +15,13 @@ module proj_unit #(
     input  wire signed [DW-1:0]     w_v      [0:PE_NUM*N-1],
 
     output reg                      out_valid,
-    output wire signed [2*DW-1:0]  out_q    [0:PE_NUM-1],
-    output wire signed [2*DW-1:0]  out_k    [0:PE_NUM-1],
-    output wire signed [2*DW-1:0]  out_v    [0:PE_NUM-1]
+    output wire signed [2*DW+$clog2(N)-1:0]  out_q    [0:PE_NUM-1],
+    output wire signed [2*DW+$clog2(N)-1:0]  out_k    [0:PE_NUM-1],
+    output wire signed [2*DW+$clog2(N)-1:0]  out_v    [0:PE_NUM-1]
 );
 
     //========================================================================
-    // 1) reshape flattened weights ¡æ 2D arrays [PE_NUM][N]
+    // 1) reshape flattened weights â†’ 2D arrays [PE_NUM][N]
     //========================================================================
     wire signed [DW-1:0] wq_mat [0:PE_NUM-1][0:N-1],
                          wk_mat [0:PE_NUM-1][0:N-1],
@@ -43,7 +43,7 @@ module proj_unit #(
     // 2) instantiate three pe_array: one each for Q, K, V
     //========================================================================
     wire [0:PE_NUM-1]         done_q, done_k, done_v;
-    wire signed [2*DW-1:0]    yq   [0:PE_NUM-1],
+    wire signed [2*DW+$clog2(N)-1:0]    yq   [0:PE_NUM-1],
                              yk   [0:PE_NUM-1],
                              yv   [0:PE_NUM-1];
 
