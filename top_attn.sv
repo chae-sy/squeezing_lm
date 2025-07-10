@@ -146,6 +146,8 @@ module top_attention #(
   // --------------------------------------------------------------------
   // FSM
   // --------------------------------------------------------------------
+  reg [$clog2(SEQ_LEN)-1:0] kv_addr;  // token index
+reg [$clog2(D)-1:0]       proj_cnt;
   always @(posedge clk) begin
     if (rst) begin
       state      <= IDLE;
@@ -173,26 +175,29 @@ module top_attention #(
           pu_start   <= 1; pu_in_valid <= 1;
         end
 
-        PROJ: if (pu_out_valid) begin
-          // got q_vec, k_vec, v_vec
-          pu_start    <= 1;
-          pu_in_valid <= 1;
-
-          if (proj_cnt == D-1) begin
-            // D번째 사이클 끝나면 다음 단계로
-            state    <= WRITE_KV;
-          end else begin
-            proj_cnt <= proj_cnt + 1;
-          end
+        PROJ: begin
+        // 1) 각 차원마다 projection input
+        pu_start    <= 1;
+        pu_in_valid <= 1;
+        // 2) 마지막 차원(63)까지 다 feed한 뒤
+        if (proj_cnt == D-1) begin
+          state <= WRITE_KV;
+        end else begin
+          proj_cnt <= proj_cnt + 1;
         end
+      end
 
-        WRITE_KV: begin
-          // write V next
-          kv_din   <= v_vec[0] << DW | v_vec[1];
-          kv_we    <= 1;
-          state    <= LOAD_KV;
-          load_idx <= 0;
-        end
+      WRITE_KV: begin
+        // pu_out_valid 대신 proj_cnt==D-1 로 이미 보장됨
+        // 3) k_vec, v_vec 전송 시점: 한번만
+        kv_din   <= { k_vec[0], k_vec[1], k_vec[2], k_vec[3],
+                     k_vec[4], k_vec[5], k_vec[6], k_vec[7],
+                      k_vec[8], k_vec[9], k_vec[10], k_vec[11] };
+        kv_we    <= 1;
+        // 다음 토큰을 위해 address 한 칸 이동
+        kv_addr  <= kv_addr + 1;
+        state    <= LOAD_KV;
+      end
 
         LOAD_KV: begin
           // start loading caches into k_mat/v_mat arrays
