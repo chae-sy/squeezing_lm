@@ -22,16 +22,21 @@ module pe #(
             done    <= 0;
         end else begin
             if (valid) begin
-                acc <= 0;
+                acc     <= 0;
                 col_idx <= 0;
-                done <= 0;
+                done    <= 0;
+                y       <= 0;
             end else if (col_idx < N) begin
-                acc <= acc + row_data[col_idx] * x[col_idx];
+                acc     <= acc + row_data[col_idx] * x[col_idx];
                 col_idx <= col_idx + 1;
                 if (col_idx == N-1) begin
-                    y    <= acc + row_data[N-1] * x[N-1];  // ¸¶Áö¸· Ç× Ãß°¡
+                    y    <= acc + row_data[N-1] * x[N-1];
                     done <= 1;
                 end
+            end else begin
+                // ? ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½Ä¿ï¿½ï¿½ï¿½ ï¿½Úµï¿½ Å¬ï¿½ï¿½ï¿½ï¿½
+                y    <= 0;
+                done <= 0;
             end
         end
     end
