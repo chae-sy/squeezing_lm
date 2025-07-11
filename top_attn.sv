@@ -18,19 +18,35 @@ module top_attention #(
   input  wire signed [DW-1:0]         wq        [0:HEADS*D-1],
   input  wire signed [DW-1:0]         wk        [0:HEADS*D-1],
   input  wire signed [DW-1:0]         wv        [0:HEADS*D-1],
+  input  wire signed [DW2-1:0]       w_proj  [0:HS*HEADS-1],
+  input  wire signed [ACC_PW-1:0]    b_proj  [0:HS-1],
   // final attention output
   output reg                          out_valid,
   output reg signed [DW+FRAC_W+ $clog2(SEQ_LEN)-1:0]
-                                      out_vec   [0:HEADS-1]
+                                      out_vec  [0:HEADS*D-1]  // 최종 hidden_size
 );
+localparam DW2    = DW+FRAC_W+$clog2(SEQ_LEN);    // attention reader 폭
+  localparam HS     = HEADS*D;                     // hidden_size
+  localparam ACC_PW = DW2 + $clog2(HEADS);          // proj accumulator 폭
 
   // FSM states
+    // FSM states (with ATTN_DONE between READ_V and CPROJ)
   typedef enum logic [3:0] {
-    IDLE,         PROJ,       WRITE_KV,
-    LOAD_KV,      WAIT_LOAD,  QK,
-    SOFTMAX,      READ_V,     ATTN_DONE
+    IDLE,        // 0
+    PROJ,        // 1
+    WRITE_KV,    // 2
+    LOAD_KV,     // 3
+    WAIT_LOAD,   // 4
+    QK,          // 5
+    SOFTMAX,     // 6
+    READ_V,      // 7
+    ATTN_DONE,   // 8  ← attention reader 완료
+    CPROJ,       // 9  ← final projection 단계
+    DONE         // 10 ← 전체 완료
   } state_t;
+
   state_t state;
+  integer i;
 
   // --------------------------------------------------------------------
   // Signals between blocks
@@ -133,14 +149,47 @@ module top_attention #(
   // --------------------------------------------------------------------
   // 5) Attention Reader
   // --------------------------------------------------------------------
-  attn_reader #(.SEQ_LEN(SEQ_LEN), .HEAD_DIM(HEADS),
-                .DW(DW), .FRAC_W(FRAC_W)) U_ar (
-    .clk(clk), .rst(rst),
-    .start(ar_start),
-    .score(pmf),
-    .v_mat(v_mat),
+ wire signed [DW2-1:0] attn_out [0:HEADS-1];
+  wire                  ar_done;
+
+  attn_reader #(
+    .SEQ_LEN (SEQ_LEN),
+    .HEAD_DIM(HEADS),
+    .DW      (DW),
+    .FRAC_W  (FRAC_W)
+  ) U_ar (
+    .clk      (clk), .rst(rst),
+    .start    (ar_start),
+    .score    (pmf),
+    .v_mat    (v_mat),
     .out_valid(ar_done),
-    .out_vec(attn_out)
+    .out_vec  (attn_out)
+  );
+ // --------------------------------------------------------------------
+  // 6) Final projection (c_proj) : HEADS → HS
+  // --------------------------------------------------------------------
+  // w_proj, b_proj 는 HS×HEADS 크기
+  
+
+  reg                                  proj2_start, proj2_in_valid;
+  wire                                 proj2_out_valid;
+  wire signed [ACC_PW-1:0]             proj2_out   [0:HS-1];
+
+  linear_unit #(
+    .D_IN  (HEADS),
+    .D_OUT (HS),
+    .DW    (DW2),
+    .ACC_W (ACC_PW)
+  ) U_cproj (
+    .clk       (clk), 
+    .rst       (rst),
+    .start     (proj2_start),
+    .in_valid  (proj2_in_valid),
+    .in_vec    (attn_out),
+    .w_mat     (w_proj),
+    .b_vec     (b_proj),
+    .out_valid (proj2_out_valid),
+    .out_vec   (proj2_out)
   );
 
   // --------------------------------------------------------------------
@@ -148,64 +197,82 @@ module top_attention #(
   // --------------------------------------------------------------------
   reg [$clog2(SEQ_LEN)-1:0] kv_addr;  // token index
 reg [$clog2(D)-1:0]       proj_cnt;
-  always @(posedge clk) begin
-    if (rst) begin
-      state      <= IDLE;
-      pu_start   <= 0; pu_in_valid <= 0;
-      kv_we      <= 0; kv_addr <= 0; kv_din <= 0;
-      load_idx   <= 0;
-      qk_start   <= 0;
-      sm_start   <= 0;
-      ar_start   <= 0;
-      out_valid  <= 0;
-      proj_cnt    <= 0;
-    end else begin
-      // default deassert
-      pu_start   <= 0; pu_in_valid <= 0;
-      kv_we      <= 0;
-      qk_start   <= 0;
-      sm_start   <= 0;
-      ar_start   <= 0;
-      out_valid  <= 0;
-      
+     
 
-      case (state)
-        IDLE: if (start) begin
-          state      <= PROJ;
-          pu_start   <= 1; pu_in_valid <= 1;
+      //=========================================================
+// inside top_attention, main FSM
+//=========================================================
+always @(posedge clk or posedge rst) begin
+  if (rst) begin
+    // reset all control signals and counters
+    state        <= IDLE;
+    pu_start     <= 1'b0;
+    pu_in_valid  <= 1'b0;
+    proj_cnt     <= 0;
+    kv_we        <= 1'b0;
+    kv_addr      <= 0;
+    load_idx     <= 0;
+    qk_start     <= 1'b0;
+    sm_start     <= 1'b0;
+    ar_start     <= 1'b0;
+    out_valid    <= 1'b0;
+  end else begin
+    // default: deassert all pulsed signals
+    pu_start     <= 1'b0;
+    pu_in_valid  <= 1'b0;
+    kv_we        <= 1'b0;
+    qk_start     <= 1'b0;
+    sm_start     <= 1'b0;
+    ar_start     <= 1'b0;
+    out_valid    <= 1'b0;
+
+    case (state)
+      //----------------------------------------
+      IDLE: begin
+        if (start) begin
+          // start projection of first token
+          state        <= PROJ;
+          proj_cnt     <= 0;
+          pu_start     <= 1'b1;
+          pu_in_valid  <= 1'b1;
         end
+      end
 
-        PROJ: begin
-        // 1) 각 차원마다 projection input
-        pu_start    <= 1;
-        pu_in_valid <= 1;
-        // 2) 마지막 차원(63)까지 다 feed한 뒤
+      //----------------------------------------
+      PROJ: begin
+        // feed one dimension per cycle
+        pu_start     <= 1'b1;
+        pu_in_valid  <= 1'b1;
+
         if (proj_cnt == D-1) begin
-          state <= WRITE_KV;
+          // after D cycles, projection done → write KV
+          state    <= WRITE_KV;
         end else begin
           proj_cnt <= proj_cnt + 1;
         end
       end
 
+      //----------------------------------------
       WRITE_KV: begin
-        // pu_out_valid 대신 proj_cnt==D-1 로 이미 보장됨
-        // 3) k_vec, v_vec 전송 시점: 한번만
-        kv_din   <= { k_vec[0], k_vec[1], k_vec[2], k_vec[3],
-                     k_vec[4], k_vec[5], k_vec[6], k_vec[7],
+        // pack all HEADS k_vec into kv_din once
+        kv_din   <= { k_vec[0], k_vec[1], k_vec[2],  k_vec[3],
+                      k_vec[4], k_vec[5], k_vec[6],  k_vec[7],
                       k_vec[8], k_vec[9], k_vec[10], k_vec[11] };
-        kv_we    <= 1;
-        // 다음 토큰을 위해 address 한 칸 이동
-        kv_addr  <= kv_addr + 1;
+        kv_we    <= 1'b1;
+        kv_addr  <= kv_addr + 1;   // next token slot
         state    <= LOAD_KV;
       end
 
-        LOAD_KV: begin
-          // start loading caches into k_mat/v_mat arrays
-          state <= WAIT_LOAD;
-        end
+      //----------------------------------------
+      LOAD_KV: begin
+        // kick off cache-to-array loading
+        state <= WAIT_LOAD;
+      end
 
-        WAIT_LOAD: if (k_cache_val && v_cache_val) begin
-          // latch both
+      //----------------------------------------
+      WAIT_LOAD: begin
+        // wait until both k_cache and v_cache produce valid data
+        if (k_cache_val && v_cache_val) begin
           k_mat[load_idx] <= k_cache_dout;
           v_mat[load_idx] <= v_cache_dout;
           if (load_idx == SEQ_LEN-1) begin
@@ -214,32 +281,50 @@ reg [$clog2(D)-1:0]       proj_cnt;
             load_idx <= load_idx + 1;
           end
         end
+      end
 
-        QK: begin
-          qk_start <= 1;
-          state    <= SOFTMAX;
-        end
+      //----------------------------------------
+      QK: begin
+        // start Q·K? matmul
+        qk_start <= 1'b1;
+        state    <= SOFTMAX;
+      end
 
-        SOFTMAX: if (qk_done) begin
-          sm_start <= 1;
+      //----------------------------------------
+      SOFTMAX: begin
+        if (qk_done) begin
+          // when QK done, start softmax
+          sm_start <= 1'b1;
           state    <= READ_V;
         end
+      end
 
-        READ_V: if (sm_done) begin
-          ar_start <= 1;
+      //----------------------------------------
+      READ_V: begin
+        if (sm_done) begin
+          // when softmax done, start attention read
+          ar_start <= 1'b1;
           state    <= ATTN_DONE;
         end
+      end
 
-        ATTN_DONE: if (ar_done) begin
-          // output attention result
+      //----------------------------------------
+      ATTN_DONE: begin
+        if (ar_done) begin
+          // finally latch multi-head outputs
           for (i = 0; i < HEADS; i = i + 1)
             out_vec[i] <= attn_out[i];
-          out_valid <= 1;
-          // prepare next token? here just go IDLE
-          state <= IDLE;
+          out_valid <= 1'b1;
+          state     <= IDLE;  // ready for next token
         end
-      endcase
-    end
+      end
+
+      //----------------------------------------
+      default: state <= IDLE;
+    endcase
   end
+end
+
+  
 
 endmodule
