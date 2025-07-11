@@ -15,9 +15,9 @@ module proj_unit #(
     input  wire signed [DW-1:0]     w_v      [0:PE_NUM*N-1],
 
     output reg                      out_valid,
-    output wire signed [2*DW+$clog2(N)-1:0]  out_q    [0:PE_NUM-1],
-    output wire signed [2*DW+$clog2(N)-1:0]  out_k    [0:PE_NUM-1],
-    output wire signed [2*DW+$clog2(N)-1:0]  out_v    [0:PE_NUM-1]
+    output reg signed [2*DW+$clog2(N)-1:0]  out_q    [0:PE_NUM-1],
+    output reg signed [2*DW+$clog2(N)-1:0]  out_k    [0:PE_NUM-1],
+    output reg signed [2*DW+$clog2(N)-1:0]  out_v    [0:PE_NUM-1]
 );
 
     //========================================================================
@@ -28,6 +28,7 @@ module proj_unit #(
                          wv_mat [0:PE_NUM-1][0:N-1];
 
     genvar h, i;
+    integer p;
     generate
       for (h = 0; h < PE_NUM; h = h + 1) begin : WEIGHT_RESHAPE
         for (i = 0; i < N; i = i + 1) begin
@@ -43,7 +44,7 @@ module proj_unit #(
     // 2) instantiate three pe_array: one each for Q, K, V
     //========================================================================
     wire [0:PE_NUM-1]         done_q, done_k, done_v;
-    wire signed [2*DW+$clog2(N)-1:0]    yq   [0:PE_NUM-1],
+    wire signed [2*DW-1:0]    yq   [0:PE_NUM-1],
                              yk   [0:PE_NUM-1],
                              yv   [0:PE_NUM-1];
 
@@ -93,20 +94,22 @@ module proj_unit #(
           // all PEs in Q/K/V arrays have finished
           out_valid  <= 1'b1;
           collecting <= 1'b0;
+          for (p = 0; p < PE_NUM; p = p + 1) begin
+         out_q[p] <= yq[p];
+         out_k[p] <= yk[p];
+         out_v[p] <= yv[p];
+        end
         end else begin
           out_valid  <= 1'b0;
+          for (p = 0; p < PE_NUM; p = p + 1) begin
+         out_q[p] <= {2*DW+$clog2(N){1'b0}};
+         out_k[p] <= {2*DW+$clog2(N){1'b0}};
+         out_v[p] <= {2*DW+$clog2(N){1'b0}};
+        end
         end
       end
     end
 
-    // hook up outputs
-    genvar p;
-    generate
-      for (p = 0; p < PE_NUM; p = p + 1) begin
-        assign out_q[p] = yq[p];
-        assign out_k[p] = yk[p];
-        assign out_v[p] = yv[p];
-      end
-    endgenerate
+    
 
 endmodule
