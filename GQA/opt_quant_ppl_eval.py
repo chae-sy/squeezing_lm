@@ -5,9 +5,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "4")
 
-# ============================================================
-# Small helpers
-# ============================================================
+
 def _qmax(bits: int) -> int:
     assert 2 <= bits <= 8, "Supported bit-widths: 2..8"
     return (1 << (bits - 1)) - 1  # symmetric signed [-qmax, qmax]
@@ -17,9 +15,6 @@ def _percentile(x: torch.Tensor, q: float | None, dim=None, keepdim=False):
         return x.abs().amax(dim=dim, keepdim=keepdim)
     return torch.quantile(x.abs(), q, dim=dim, keepdim=keepdim)
 
-# ============================================================
-# Data & Eval
-# ============================================================
 def build_wikitext2_trainval(tokenizer, block_size=1024):
     raw = load_dataset("wikitext", "wikitext-2-raw-v1")
 
@@ -68,9 +63,6 @@ def eval_ppl(model, tokenizer, dataset, batch_size=8, max_batches=None, device="
         total_tokens += tokens
     return math.exp(total_nll / max(1, total_tokens))
 
-# ============================================================
-# Quantization primitives
-# ============================================================
 def quantize_per_channel_nbit(w: torch.Tensor, axis: int, bits: int, clip_q: float | None = None, eps: float = 1e-8):
     qmax = _qmax(bits)
     max_abs = _percentile(w, clip_q, dim=axis, keepdim=True).clamp(min=eps)         # on w.device
@@ -112,9 +104,7 @@ def quantize_weight_groupwise_nbit(
     w_deq = w_q.float() * rep
     return w_deq, {"kind": "group", "scale": scales, "group_size": group_size}
 
-# ============================================================
-# Activation fake-quant (inference-safe)
-# ============================================================
+
 class ActFakeQuantPerTensorFixed(nn.Module):
     """Per-tensor symmetric n-bit fake-quant with a fixed (calibrated) scale."""
     def __init__(self, a_bits: int, a_scale: torch.Tensor, eps: float = 1e-8):
@@ -153,9 +143,7 @@ class ActFakeQuantPerChannelNbit(nn.Module):
             x_q = torch.round((x / a).clamp(-self.qmax, self.qmax))
             return x_q * a
 
-# ============================================================
-# Activation fake-quant (QAT with STE + EMA)
-# ============================================================
+
 class ActFakeQuantPerChannelQAT(nn.Module):
     """
     Per-channel (last-dim) n-bit fake-quant for QAT:
@@ -202,9 +190,7 @@ class ActFakeQuantPerChannelQAT(nn.Module):
         y_q = (y_q - y).detach() + y
         return y_q * a
 
-# ============================================================
-# Plain W/A fake-quant (baseline)
-# ============================================================
+
 class QuantLinearNbit(nn.Module):
     """Uniform W{w_bits}A{a_bits} fake-quant (per-out-channel W; activations left Identity here)."""
     def __init__(self, lin: nn.Linear, w_bits: int = 8, a_bits: int = 8):
@@ -229,9 +215,7 @@ def replace_linear_with_quant(module: nn.Module, w_bits: int = 8, a_bits: int = 
         else:
             replace_linear_with_quant(child, w_bits=w_bits, a_bits=a_bits)
 
-# ============================================================
-# SmoothQuant (improved) for inference-only modes
-# ============================================================
+
 class SQQuantLinearNbit(nn.Module):
     """
     SmoothQuant + fake-quant (inference-safe):
@@ -421,9 +405,7 @@ def recalibrate_act_scales_post_sq(model: nn.Module, calib_loader, device, quant
     for batch in calib_loader:
         _ = model(input_ids=batch["input_ids"].to(device))
     for h in hooks: h.remove()
-# ============================================================
-# LoRA-QAT W4A4: Quantized + LoRA layer
-# ============================================================
+
 class SQQuantLoRALinearW4A4(nn.Module):
     """
     SmoothQuant + W4A4 fake-quant + trainable LoRA (A,B) adapters.
@@ -633,9 +615,7 @@ def recalibrate_act_scales_post_lora_w4a4(model: nn.Module, calib_loader, device
         _ = model(input_ids=batch["input_ids"].to(device))
     for h in hooks: h.remove()
 
-# ============================================================
-# LoRA-QAT training loop
-# ============================================================
+
 def lora_qat_train(model, train_loader, device, lr=3e-4, weight_decay=0.0,
                    steps=1000, grad_accum=1, warmup_steps=100, print_every=50,
                    max_grad_norm=1.0):
@@ -674,9 +654,7 @@ def lora_qat_train(model, train_loader, device, lr=3e-4, weight_decay=0.0,
             print(f"[QAT] step {step}/{steps} | loss={running/print_every:.4f} | lr={opt.param_groups[0]['lr']:.2e}")
             running = 0.0
 
-# ============================================================
-# Main
-# ============================================================
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["fp16", "w8a8", "sq", "w8a8_sq", "lora_qat_w4a4"], required=True)

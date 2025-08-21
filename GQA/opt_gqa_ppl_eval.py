@@ -24,9 +24,7 @@ from transformers import AutoConfig
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
-# ------------------------------
-# GQA Attention (decoder-only)
-# ------------------------------
+
 class GQAAttention(nn.Module):
     """
     Drop-in replacement for OPT self-attn that uses:
@@ -205,9 +203,6 @@ class GQAAttention(nn.Module):
         return gqa
 
 
-# ------------------------------
-# Patching OPT layers
-# ------------------------------
 def patch_opt_to_gqa(model: OPTForCausalLM, groups: int):
     for layer in model.model.decoder.layers:
         old = layer.self_attn
@@ -221,9 +216,7 @@ def patch_opt_to_gqa(model: OPTForCausalLM, groups: int):
     return model
 
 
-# ------------------------------
-# Datasets & Data Collation
-# ------------------------------
+
 def get_dataset(name: str):
     if name.lower() in ["wikitext-2", "wikitext2", "wt2"]:
         ds = load_dataset("wikitext", "wikitext-2-raw-v1")
@@ -257,9 +250,7 @@ def tokenize_dataset(ds, tokenizer, text_column, block_size=1024):
     return out
 
 
-# ------------------------------
-# Perplexity evaluation
-# ------------------------------
+
 @torch.no_grad()
 def eval_ppl(model, tokenizer, dataset, batch_size=8, max_batches=None, device="cuda"):
     import math, torch
@@ -312,9 +303,6 @@ def eval_ppl(model, tokenizer, dataset, batch_size=8, max_batches=None, device="
 
 
 
-# ------------------------------
-# Greedy decode speed test
-# ------------------------------
 @torch.no_grad()
 def speed_test(model, tokenizer, gen_input_len=512, gen_new_tokens=256, device="cuda"):
     model.eval().to(device)
