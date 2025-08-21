@@ -941,7 +941,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
 
-    if args.mode == "lora_qat_w4a4":
+    if args.mode in ["lora_qat_w4a4", "lora_qat_w4a4_sq"]:
         print("Building WikiText-2 (raw) train & validation sets...")
         data = build_wikitext2_trainval(tokenizer, block_size=args.block_size)
     else:
