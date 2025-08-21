@@ -2,9 +2,9 @@
 
 module top_block_ctrl_tb;
 
-  // Clock & reset
+  // Clock & rstn
   reg clk = 1'b0;
-  reg reset;
+  reg rstn;
 
   // DUT I/O
   reg  proj_done, qk_matmul_done, attn_reader_done, linear1_done, linear2_done, ln_done;
@@ -16,7 +16,7 @@ module top_block_ctrl_tb;
   // DUT
   top_block_ctrl dut (
     .clk(clk),
-    .reset(reset),
+    .rstn(rstn),
     .proj_done(proj_done),
     .qk_matmul_done(qk_matmul_done),
     .attn_reader_done(attn_reader_done),
@@ -45,9 +45,9 @@ module top_block_ctrl_tb;
 
   // Reset
   initial begin
-    reset = 1'b1;
+    rstn = 1'b0;
     repeat (3) @(posedge clk);
-    reset = 1'b0;
+    rstn = 1'b1;
   end
 
 

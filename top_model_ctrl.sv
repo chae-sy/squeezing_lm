@@ -4,7 +4,7 @@ module top_model_ctrl #(
     parameter integer NUM_LAYER = 12
 )(
     input  wire clk,
-    input  wire reset,
+    input  wire rstn,
 
     input  wire start,
     input  wire linear2_done,
@@ -25,8 +25,8 @@ reg [$clog2(NUM_LAYER+1)-1:0] layer_cnt;
 
 
 
-always @(posedge clk or posedge reset) begin
-    if (reset) begin
+always @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
         state          <= IDLE;
         done           <= 1'b0;
         ln_start       <= 1'b0;

@@ -2,7 +2,7 @@
 
 module top_block_ctrl(
     input  clk,
-    input  reset,
+    input  rstn,
 
     input  proj_done,
     input  qk_matmul_done,
@@ -38,8 +38,8 @@ module top_block_ctrl(
     reg [3:0] next_state;
 
     // ---- State register ----
-    always @(posedge clk or posedge reset) begin
-        if (reset)
+    always @(posedge clk or negedge rstn) begin
+        if (!rstn)
             state <= IDLE;
         else
             state <= next_state;

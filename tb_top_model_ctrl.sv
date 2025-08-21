@@ -12,7 +12,7 @@ module tb_top_model_ctrl;
   // DUT I/O
   // ----------------------------------------------------------------
   reg  clk;
-  reg  reset;
+  reg  rstn;
   reg  start;
   reg  linear2_done;
   reg  out_done;
@@ -27,7 +27,7 @@ module tb_top_model_ctrl;
     .NUM_LAYER(NUM_LAYER)
   ) dut (
     .clk(clk),
-    .reset(reset),
+    .rstn(rstn),
     .start(start),
     .linear2_done(linear2_done),
     .out_done(out_done),
@@ -51,15 +51,15 @@ module tb_top_model_ctrl;
 
   initial begin
     // Init
-    reset            = 1'b1;
+    rstn            = 1'b0;
     start            = 1'b0;
     linear2_done     = 1'b0;
     out_done         = 1'b0;
     
 
-    // Hold reset a few cycles
+    // Hold rstn a few cycles
     repeat(1) @ (posedge clk);
-    reset = 1'b0;
+    rstn = 1'b1;
     repeat(5) @ (posedge clk);
 
     // Kick off: single-cycle start

@@ -8,7 +8,7 @@ module top #(
 
 )(
     input clk,
-    input reset,
+    input rstn,
     input start,
     output done,
     input [HIDDEN*ACT_BITWIDTH-1:0] input,
@@ -26,7 +26,7 @@ wire out_start, out_done;
 
 top_block_ctrl u_top_block_ctrl(
     .clk(clk),
-    .reset(reset),
+    .rstn(rstn),
     .proj_done(proj_done),
     .qk_matmul_done(qk_matmul_done),
     .attn_reader_done(attn_reader_done),
@@ -45,7 +45,7 @@ top_model_ctrl #(
     .NUM_LAYER(NUM_LAYER)
   ) dut (
     .clk(clk),
-    .reset(reset),
+    .rstn(rstn),
     .start(start),
     .linear2_done(linear2_done),
     .out_done(out_done),
