@@ -4,6 +4,60 @@ from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "4")
+# -------------------- LAMBADA helpers --------------------
+class LambadaEvaluator:
+    """
+    Accuracy on LAMBADA with the task:
+      - Given an input sequence, predict the last word.
+      - We compare argmax(logits at position -2) to the true last token (label = input_ids[-1]).
+    """
+    def __init__(self, dataset, tokenizer, device):
+        self.dataset = dataset
+        self.tokenizer = tokenizer
+        self.device = device
+        # dataset is already tokenized & torch-formatted
+
+    @torch.no_grad()
+    def evaluate(self, model):
+        model.eval().to(self.device)
+        total, hit = 0, 0
+        for batch in self.dataset:
+            # Each batch item is already a single example (no DataLoader here)
+            input_ids = batch["input_ids"].to(self.device)
+            if input_ids.numel() < 2:
+                continue
+            # add batch dim
+            input_ids = input_ids.unsqueeze(0)  # [1, T]
+            label = input_ids[:, -1]           # last token is the answer
+            outputs = model(input_ids)
+            # use logits at position -2 to predict the next (last) token
+            last_token_logits = outputs.logits[:, -2, :]  # [1, vocab]
+            pred = last_token_logits.argmax(dim=-1)
+            total += label.size(0)
+            hit += (pred == label).sum().item()
+        return hit / max(1, total)
+
+def build_lambada(tokenizer, samples=1000):
+    """
+    Loads LAMBADA and tokenizes it; returns a torch-formatted HF Dataset.
+    We follow the user's earlier call signature: load_dataset("lambada", split="validation[:N]").
+    """
+    raw = load_dataset("lambada", split=f"validation[:{samples}]")
+
+    def tokenize_function(examples):
+        # minimal tokenization: keep only input_ids
+        # we assume each "text" is a full sentence; no truncation here
+        return tokenizer(examples["text"])
+
+    tokenized = raw.map(tokenize_function, batched=True, remove_columns=raw.column_names)
+    # Some entries may be too short (need at least 2 tokens to use -2 index)
+    def filter_short(ex):
+        return len(ex["input_ids"]) >= 2
+    tokenized = tokenized.filter(filter_short)
+
+    tokenized.set_format(type="torch", columns=["input_ids"])
+    return tokenized
+# ---------------------------------------------------------
 
 
 def _qmax(bits: int) -> int:
@@ -685,6 +739,10 @@ def main():
     parser.add_argument("--qat_accum", type=int, default=1)
     parser.add_argument("--train_bs", type=int, default=8)
     parser.add_argument("--max_train_batches", type=int, default=None)
+    parser.add_argument("--eval_lambada", action="store_true",
+                        help="If set, also evaluate LAMBADA last-word accuracy.")
+    parser.add_argument("--lambada_samples", type=int, default=1000,
+                        help="Number of validation samples for LAMBADA, e.g., 1000.")
 
     args = parser.parse_args()
 
@@ -800,6 +858,13 @@ def main():
     ppl = eval_ppl(model, tokenizer, data if "validation" in data else {"validation": data["validation"]},
                    batch_size=args.eval_bs, max_batches=args.max_batches, device=args.device)
     print(f"[Mode: {args.mode}] Perplexity: {ppl:.4f}")
-
+    if args.eval_lambada:
+        print(f"Building LAMBADA validation[:{args.lambada_samples}]…")
+        lambada_ds = build_lambada(tokenizer, samples=args.lambada_samples)
+        print("Evaluating LAMBADA last-word accuracy…")
+        lambada_eval = LambadaEvaluator(lambada_ds, tokenizer, args.device)
+        lambada_acc = lambada_eval.evaluate(model)
+        print(f"[Mode: {args.mode}] LAMBADA accuracy: {lambada_acc:.4f}")
+    
 if __name__ == "__main__":
     main()
