@@ -581,6 +581,9 @@ def main():
             m.B.weight.requires_grad = True
             lora_params += m.A.weight.numel() + m.B.weight.numel()
     print(f"Trainable parameters: {lora_params/1e6:.2f}M")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(name)
 
     train_lora_qat(
         model, tokenizer, ds, device,
