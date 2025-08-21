@@ -581,6 +581,192 @@ class SQQuantLoRALinearW4A4(nn.Module):
 
     def set_lora_scale(self, new_scale: float):
         self.scaling = float(new_scale)
+class SQQuantLoRALinearOnSQBase(nn.Module):
+    """
+    SmoothQuant base (W8 per-channel, A8 identity) + LoRA adapter trained with A4 (QAT).
+      - Base path: W8 (per-channel) dequantized into float buffer, activations rescaled by s_vec, no A-quant clip.
+      - LoRA path: A4 per-channel with EMA+STE; LoRA weights in FP.
+    """
+    def __init__(
+        self,
+        lin: nn.Linear,
+        s_vec: torch.Tensor,
+        amax_vec: torch.Tensor,
+        *,
+        rank: int = 8,
+        lora_alpha: float = 16.0,
+        lora_dropout: float = 0.0,
+        bias_correction: bool = True,
+        mean_vec: torch.Tensor | None = None,
+        eps: float = 1e-8,
+        qat_momentum: float = 0.99,
+        qat_quantile: float | None = 0.9995,
+    ):
+        super().__init__()
+        dev = lin.weight.device
+        self.in_features  = lin.in_features
+        self.out_features = lin.out_features
+        self.rank         = int(rank)
+        self.scaling      = float(lora_alpha) / max(1, self.rank)
+
+        # SmoothQuant rescale vector (input-dim)
+        self.register_buffer("s_vec", torch.clamp(s_vec.to(dev, dtype=torch.float32), min=eps), persistent=False)
+
+        # Bias
+        if lin.bias is not None:
+            self.bias = nn.Parameter(lin.bias.detach().clone())
+        else:
+            self.bias = None
+
+        # -------- Base W8 per-channel (store dequantized float) --------
+        w = lin.weight.detach().to(torch.float32)
+        w_int8, w_scale = quantize_per_channel_nbit(w * self.s_vec.unsqueeze(0), axis=1, bits=8)
+        w_deq = w_int8.float() * w_scale.unsqueeze(1)   # [out, in]
+        self.register_buffer("w_deq", w_deq, persistent=False)
+
+        # -------- LoRA path: A4 per-channel (QAT) --------
+        # init activation scale with SQ-rescaled amax (amax' = amax / s)
+        a_init = (torch.clamp(amax_vec.to(dev, dtype=torch.float32), min=eps) / self.s_vec) / float(_qmax(4))
+        a_init = torch.clamp(a_init, min=eps)
+        self.act_q = ActFakeQuantPerChannelQAT(4, a_init, momentum=qat_momentum, quantile=qat_quantile, eps=eps)
+
+        # LoRA params (FP)
+        self.lora_A = nn.Parameter(torch.empty(self.in_features, self.rank, dtype=torch.float32, device=dev))
+        self.lora_B = nn.Parameter(torch.zeros(self.rank, self.out_features, dtype=torch.float32, device=dev))
+        nn.init.normal_(self.lora_A, mean=0.0, std=1e-3)
+        self.lora_dropout = nn.Dropout(p=lora_dropout) if lora_dropout > 0.0 else nn.Identity()
+
+        # Optional bias correction on base path
+        if bias_correction and (self.bias is not None) and (mean_vec is not None):
+            with torch.no_grad():
+                mean_x_prime = mean_vec.to(dev, dtype=torch.float32) / self.s_vec  # [in]
+                delta = (w * self.s_vec.unsqueeze(0) - self.w_deq)                 # [out, in]
+                corr = torch.matmul(delta, mean_x_prime)                            # [out]
+                self.bias.data.add_(-corr.to(self.bias.device))
+
+        # Freeze everything except LoRA (and optional bias)
+        for p in self.parameters():
+            p.requires_grad_(False)
+        self.lora_A.requires_grad_(True)
+        self.lora_B.requires_grad_(True)
+        if self.bias is not None:
+            self.bias.requires_grad_(False)
+
+    def forward(self, x: torch.Tensor):
+        # SQ rescale x' = x / s
+        s = self.s_vec
+        while s.dim() < x.dim(): s = s.unsqueeze(0)
+        x_prime = x / s
+
+        # Base W8A8 (A8 identity)
+        y = torch.matmul(x_prime, self.w_deq.t())
+
+        # LoRA with A4 on x'
+        xq = self.act_q(x_prime)
+        r = torch.matmul(self.lora_dropout(xq), self.lora_A)    # [*, r]
+        delta = torch.matmul(r, self.lora_B)                    # [*, out]
+        y = y + delta * self.scaling
+
+        if self.bias is not None:
+            y = y + self.bias
+        return y
+
+    def lora_parameters(self):
+        return [self.lora_A, self.lora_B]
+
+    @torch.no_grad()
+    def merge_lora_(self):
+        """Merge LoRA into base buffer (for inference)."""
+        W_delta = torch.matmul(self.lora_A, self.lora_B) * self.scaling   # [in, out]
+        self.w_deq.add_(W_delta.t())                                      # [out, in]
+def apply_smoothquant_with_lora_on_sq_base(
+    model: nn.Module,
+    act_stat: dict,
+    *,
+    alpha: float = 0.80,
+    lora_rank: int = 8,
+    lora_alpha: float = 16.0,
+    lora_dropout: float = 0.0,
+    qat_momentum: float = 0.99,
+    qat_quantile: float | None = 0.9995,
+    eps: float = 1e-8,
+):
+    """
+    Replace each nn.Linear (except lm_head) with: SQ base W8A8 + LoRA A4(QAT).
+    Returns list of trainable LoRA parameters.
+    """
+    trainable = []
+    def transform(module: nn.Module):
+        nonlocal trainable
+        for name, child in list(module.named_children()):
+            if isinstance(child, nn.Linear) and "lm_head" not in name.lower():
+                dev = child.weight.device
+                st = act_stat.get(child, None)
+                if st is None:
+                    amax_vec = torch.ones(child.in_features, dtype=torch.float32, device=dev)
+                    mean_vec = torch.zeros(child.in_features, dtype=torch.float32, device=dev)
+                else:
+                    amax_vec = torch.clamp(st["amax"], min=eps).to(dev)
+                    mean_vec = st["mean"].to(dev)
+
+                # SmoothQuant scale (same as your other apply_*): s = (amax^alpha) / (w_col_max^(1-alpha))
+                w_col_max = child.weight.detach().abs().amax(dim=0).clamp(min=eps)
+                s = (amax_vec.pow(alpha)) / (w_col_max.pow(1.0 - alpha))
+                s = torch.clamp(s, min=1e-3, max=1e3)
+                s = s / s.median()
+
+                layer = SQQuantLoRALinearOnSQBase(
+                    child, s, amax_vec,
+                    rank=lora_rank, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+                    bias_correction=True, mean_vec=mean_vec,
+                    eps=eps, qat_momentum=qat_momentum, qat_quantile=qat_quantile
+                )
+                setattr(module, name, layer)
+                trainable += layer.lora_parameters()
+            else:
+                transform(child)
+    transform(model)
+    return trainable
+@torch.no_grad()
+def recalibrate_act_scales_post_lora_on_sq_base(model: nn.Module, calib_loader, device, quantile: float | None):
+    """
+    Initialize/expand A4 per-channel scales for SQ+LoRA-on-SQ-base layers.
+    """
+    model.eval().to(device)
+    layers = [m for m in model.modules() if isinstance(m, SQQuantLoRALinearOnSQBase)]
+    hooks = []
+    def make_hook(m: SQQuantLoRALinearOnSQBase):
+        def hook(_module, inputs):
+            x = inputs[0]
+            s = m.s_vec
+            while s.dim() < x.dim(): s = s.unsqueeze(0)
+            x_prime = (x.to(s.device) / s)
+            x_abs = x_prime.abs()
+            x_flat = x_abs.view(-1, x_abs.shape[-1])
+            if quantile is None:
+                amax_vec = x_flat.amax(dim=0)
+            else:
+                N = x_flat.shape[0]
+                if N > 2_000_000:
+                    step = max(1, N // 500_000)
+                    x_sub = x_flat[::step]
+                    try:
+                        amax_vec = torch.quantile(x_sub, quantile, dim=0)
+                    except RuntimeError:
+                        amax_vec = torch.quantile(x_sub.detach().float().cpu(), quantile, dim=0).to(x_sub.device)
+                else:
+                    try:
+                        amax_vec = torch.quantile(x_flat, quantile, dim=0)
+                    except RuntimeError:
+                        amax_vec = torch.quantile(x_flat.detach().float().cpu(), quantile, dim=0).to(x_flat.device)
+            a_scale_vec = torch.clamp(amax_vec, min=m.act_q.eps) / float(_qmax(4))
+            m.act_q.a_scale_vec.data = torch.maximum(m.act_q.a_scale_vec, a_scale_vec)
+        return hook
+    for m in layers:
+        hooks.append(m.register_forward_pre_hook(make_hook(m), with_kwargs=False))
+    for batch in calib_loader:
+        _ = model(input_ids=batch["input_ids"].to(device))
+    for h in hooks: h.remove()
 
 def apply_smoothquant_with_lora_w4a4(model: nn.Module, act_stat: dict, alpha: float = 0.80,
                                      w_clip_q: float = 0.9995, group_size: int = 64,
@@ -711,7 +897,9 @@ def lora_qat_train(model, train_loader, device, lr=3e-4, weight_decay=0.0,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["fp16", "w8a8", "sq", "w8a8_sq", "lora_qat_w4a4"], required=True)
+    parser.add_argument("--mode",
+    choices=["fp16", "w8a8", "sq", "w8a8_sq", "lora_qat_w4a4", "lora_qat_w4a4_sq"],
+    required=True)
     parser.add_argument("--model_name", default="facebook/opt-125m")
     parser.add_argument("--block_size", type=int, default=1024)
     parser.add_argument("--eval_bs", type=int, default=8)
@@ -827,6 +1015,56 @@ def main():
 
         # Train LoRA only (QAT)
         print(f"Starting LoRA QAT: steps={args.qat_steps}, lr={args.qat_lr}, rank={args.lora_rank}, alpha={args.lora_alpha}")
+        train_loader = torch.utils.data.DataLoader(
+            data["train"], batch_size=args.train_bs, shuffle=True, drop_last=True
+        )
+        if args.max_train_batches:
+            class LimitedLoader:
+                def __init__(self, dl, maxb): self.dl, self.maxb = dl, maxb
+                def __iter__(self):
+                    it, c = iter(self.dl), 0
+                    for b in it:
+                        if c >= self.maxb: break
+                        yield b; c += 1
+                def __len__(self): return min(len(self.dl), self.maxb)
+            train_loader = LimitedLoader(train_loader, args.max_train_batches)
+
+        for p in trainable: p.requires_grad_(True)
+        lora_qat_train(
+            model, train_loader, device=args.device,
+            lr=args.qat_lr, weight_decay=args.qat_wd,
+            steps=args.qat_steps, grad_accum=args.qat_accum,
+            warmup_steps=args.qat_warmup, print_every=max(10, args.qat_steps//20),
+            max_grad_norm=1.0
+        )
+    elif args.mode == "lora_qat_w4a4_sq":
+    # Keep base as SQ W8A8, train LoRA adapters with A4 (QAT)
+        if args.alpha < 0.75:
+            args.alpha = 0.80  # stabilize A4 path; more range to weights in SQ
+
+        print(f"Calibrating activations for SmoothQuant (alpha={args.alpha}, q={args.quantile})…")
+        model = model.float()
+        # Use train split for calib to match training stats
+        calib_loader = torch.utils.data.DataLoader(
+            data["train"], batch_size=args.eval_bs, shuffle=False
+        )
+        act_stat = collect_activation_amax_per_linear(
+            model, calib_loader, device=args.device, max_batches=args.calib_batches, quantile=args.quantile
+        )
+
+        print("Injecting SQ base (W8A8) + LoRA(QAT A4) adapters …")
+        trainable = apply_smoothquant_with_lora_on_sq_base(
+            model, act_stat,
+            alpha=args.alpha,
+            lora_rank=args.lora_rank, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
+            qat_momentum=0.99, qat_quantile=args.quantile
+        )
+
+        print("Recalibrating A4 per-channel scales for LoRA path …")
+        recalibrate_act_scales_post_lora_on_sq_base(model, calib_loader, device=args.device, quantile=args.quantile)
+
+        # QAT over LoRA only
+        print(f"Starting LoRA QAT on SQ base: steps={args.qat_steps}, lr={args.qat_lr}, rank={args.lora_rank}, alpha={args.lora_alpha}")
         train_loader = torch.utils.data.DataLoader(
             data["train"], batch_size=args.train_bs, shuffle=True, drop_last=True
         )
