@@ -14,7 +14,6 @@ from transformers import (
 )
 from datasets import load_dataset
 
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "4")
 
 class GQAAttention(nn.Module):
     def __init__(self, embed_dim: int, num_q_heads: int, num_kv_heads: int, dropout: float = 0.0):

@@ -53,7 +53,7 @@ Script: opt_quant_acc_eval.py
 
 ```
 # W8A8 accuracy
-python opt_quant_acc_eval.py --mode w8a8 --lambada_split validation[:1000]
+python opt_quant_acc_eval.py --mode w8a8 
 
 # SmoothQuant W6A8 accuracy
 python opt_quant_acc_eval.py --mode sq --w_bits 6 --a_bits 8 --alpha 0.55 --calib_batches 64

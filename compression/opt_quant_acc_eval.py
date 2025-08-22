@@ -3,7 +3,6 @@ import torch, torch.nn as nn
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "4")
 
 # =======================
 # LAMBADA evaluator

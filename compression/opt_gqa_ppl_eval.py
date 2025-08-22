@@ -22,7 +22,6 @@ from datasets import load_dataset
 import os
 from transformers import AutoConfig
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 
 class GQAAttention(nn.Module):
