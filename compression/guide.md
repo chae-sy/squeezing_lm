@@ -89,7 +89,7 @@ python opt_gqa_acc_eval.py --load_dir ./opt125m-gqa3-up --max_samples 1000
 python opt_gqa_acc_eval.py --load_dir ./opt125m-gqa6-up --max_samples 1000 --cuda_visible_devices 0
 ```
 
-## 4️⃣ LoRA-QAT with MQA 
+## 5️⃣ LoRA-QAT with MQA 
 
 Script: opt_lora_qat_sq_gqa.py
 
